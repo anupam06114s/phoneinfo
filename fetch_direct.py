@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import math
 
 # Ensure utf-8 output on Windows console
 if sys.platform == "win32":
@@ -9,6 +10,18 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import duckdb
+
+def sanitize_value(val):
+    if val is None:
+        return None
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return None
+        return val
+    if isinstance(val, str):
+        cleaned = val.strip()
+        return cleaned if cleaned else None
+    return str(val)
 
 def fetch_data_direct(number: str, hf_token: str = None):
     """
@@ -28,7 +41,12 @@ def fetch_data_direct(number: str, hf_token: str = None):
 
     print(f"[INFO] Searching data for: {number} (Shard: {last_digit})...")
 
-    con = duckdb.connect()
+    con = duckdb.connect(config={
+        'max_memory': '250MB',
+        'threads': '2',
+        'enable_object_cache': 'false',
+        'preserve_insertion_order': 'false'
+    })
     con.execute("INSTALL httpfs;")
     con.execute("LOAD httpfs;")
 
@@ -43,29 +61,32 @@ def fetch_data_direct(number: str, hf_token: str = None):
         except Exception as err:
             print(f"[WARN] Secret setting: {err}")
 
-    # Optimized query matching both clean and space-padded strings with parquet pushdown
-    query = f"""
-        SELECT *, 'Main' AS _record_type FROM read_parquet('{primary_url}') 
-        WHERE mobile IN ('{number}', ' {number} ')
-        UNION ALL
-        SELECT *, 'Alt' AS _record_type FROM read_parquet('{alt_url}') 
-        WHERE alt IN ('{number}', ' {number} ')
-    """
-
     try:
-        raw_results = con.execute(query).df().to_dict(orient="records")
+        # 1. Main Shard
+        query_main = f"""
+            SELECT mobile, name, fname, address, alt, circle, id, email 
+            FROM read_parquet('{primary_url}') 
+            WHERE mobile IN ('{number}', ' {number} ')
+        """
+        rel_main = con.execute(query_main)
+        cols_main = [d[0] for d in rel_main.description]
+        main_records = [
+            {col: sanitize_value(v) for col, v in zip(cols_main, row)}
+            for row in rel_main.fetchall()
+        ]
 
-        main_records = []
-        alt_records = []
-
-        for row in raw_results:
-            rec_type = row.pop('_record_type')
-            # Clean string values (strip extra whitespaces)
-            cleaned_row = {k: v.strip() if isinstance(v, str) else v for k, v in row.items()}
-            if rec_type == 'Main':
-                main_records.append(cleaned_row)
-            else:
-                alt_records.append(cleaned_row)
+        # 2. Alt Shard
+        query_alt = f"""
+            SELECT mobile, name, fname, address, alt, circle, id, email 
+            FROM read_parquet('{alt_url}') 
+            WHERE alt IN ('{number}', ' {number} ')
+        """
+        rel_alt = con.execute(query_alt)
+        cols_alt = [d[0] for d in rel_alt.description]
+        alt_records = [
+            {col: sanitize_value(v) for col, v in zip(cols_alt, row)}
+            for row in rel_alt.fetchall()
+        ]
 
         if not main_records and not alt_records:
             result = {

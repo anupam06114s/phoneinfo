@@ -2,11 +2,18 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import os
+import math
 import duckdb
 
 app = FastAPI()
 
-con = duckdb.connect()
+# Configure DuckDB with low memory footprint suitable for Render (512MB RAM free tier)
+con = duckdb.connect(config={
+    'max_memory': '250MB',
+    'threads': '2',
+    'enable_object_cache': 'false',
+    'preserve_insertion_order': 'false'
+})
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 
@@ -104,6 +111,38 @@ LANDING_PAGE_HTML = """
 </html>
 """
 
+def sanitize_value(val):
+    """Safely convert NaNs, Infinities, and whitespace-padded strings to JSON-compliant values."""
+    if val is None:
+        return None
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return None
+        return val
+    if isinstance(val, str):
+        cleaned = val.strip()
+        return cleaned if cleaned else None
+    return str(val)
+
+def query_parquet_shard(url: str, filter_col: str, number: str):
+    """Query a single parquet shard using low memory fetchall and return cleaned list of dicts."""
+    query = f"""
+        SELECT mobile, name, fname, address, alt, circle, id, email 
+        FROM read_parquet('{url}') 
+        WHERE {filter_col} IN ('{number}', ' {number} ')
+    """
+    rel = con.execute(query)
+    cols = [d[0] for d in rel.description]
+    rows = rel.fetchall()
+    
+    result = []
+    for row in rows:
+        row_dict = {}
+        for col_name, val in zip(cols, row):
+            row_dict[col_name] = sanitize_value(val)
+        result.append(row_dict)
+    return result
+
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 404:
@@ -142,26 +181,11 @@ def fetch_data(Number: str = Query(None)):
     alt_url = f"https://huggingface.co/datasets/ansh21112/hitek-data-bucket/resolve/main/alt_master_shard_{last_digit}.parquet"
     
     try:
-        query = f"""
-            SELECT *, 'Main' AS _record_type FROM read_parquet('{primary_url}') 
-            WHERE mobile IN ('{Number}', ' {Number} ')
-            UNION ALL
-            SELECT *, 'Alt' AS _record_type FROM read_parquet('{alt_url}') 
-            WHERE alt IN ('{Number}', ' {Number} ')
-        """
+        # 1. Query Main Shard (Low memory sequential)
+        main_records = query_parquet_shard(primary_url, "mobile", Number)
         
-        raw_results = con.execute(query).df().to_dict(orient="records")
-        
-        main_records = []
-        alt_records = []
-        
-        for row in raw_results:
-            rec_type = row.pop('_record_type')
-            cleaned_row = {k: v.strip() if isinstance(v, str) else v for k, v in row.items()}
-            if rec_type == 'Main':
-                main_records.append(cleaned_row)
-            else:
-                alt_records.append(cleaned_row)
+        # 2. Query Alt Shard
+        alt_records = query_parquet_shard(alt_url, "alt", Number)
         
         if not main_records and not alt_records:
             return JSONResponse(
@@ -173,14 +197,18 @@ def fetch_data(Number: str = Query(None)):
                 }
             )
             
-        return {
-            "status": "success", 
-            "Data": {
-                "Main_Records": main_records,
-                "Alt_Records": alt_records
-            },
-            "Developer": "@anupam"
-        }
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success", 
+                "phone": Number,
+                "Data": {
+                    "Main_Records": main_records,
+                    "Alt_Records": alt_records
+                },
+                "Developer": "@anupam"
+            }
+        )
         
     except Exception as e:
         return JSONResponse(
