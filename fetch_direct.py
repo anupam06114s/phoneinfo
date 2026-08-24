@@ -71,7 +71,7 @@ def fetch_data_direct(number: str, hf_token: str = None):
             result = {
                 "status": "not_found",
                 "phone": number,
-                "Developer": "@Maybechx"
+                "Developer": "@anupam"
             }
         else:
             result = {
@@ -81,7 +81,7 @@ def fetch_data_direct(number: str, hf_token: str = None):
                     "Main_Records": main_records,
                     "Alt_Records": alt_records
                 },
-                "Developer": "@Maybechx"
+                "Developer": "@anupam"
             }
 
         print("\n=== SUCCESSFUL RESULT ===")
@@ -93,7 +93,7 @@ def fetch_data_direct(number: str, hf_token: str = None):
         error_result = {
             "status": "error",
             "message": f"Database processing error: {err_msg}",
-            "Developer": "@Maybechx"
+            "Developer": "@anupam"
         }
         print("\n=== ERROR ===")
         print(json.dumps(error_result, indent=2))
@@ -103,4 +103,3 @@ if __name__ == "__main__":
     phone_num = sys.argv[1] if len(sys.argv) > 1 else input("Enter Phone Number: ")
     token = sys.argv[2] if len(sys.argv) > 2 else os.getenv("HF_TOKEN", "")
     fetch_data_direct(phone_num, token)
-
