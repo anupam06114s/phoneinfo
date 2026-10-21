@@ -2,6 +2,9 @@ import sys
 import os
 import json
 import math
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Ensure utf-8 output on Windows console
 if sys.platform == "win32":
@@ -23,23 +26,24 @@ def sanitize_value(val):
         return cleaned if cleaned else None
     return str(val)
 
-def fetch_data_direct(number: str, hf_token: str = None):
+def fetch_data_direct(number: str):
     """
-    Directly query Hugging Face parquet shards without running a local web server.
+    Directly query Hugging Face 3-digit parquet shards using DuckDB without running local server.
     """
     number = str(number).strip()
     if not number.isdigit() or len(number) < 10 or len(number) > 15:
         print(f"[ERROR] Invalid number '{number}'. Must be 10-15 digits.")
         return None
 
-    if not hf_token:
-        hf_token = os.getenv("HF_TOKEN", "").strip()
+    hf_token = os.getenv("HF_TOKEN", "").strip()
+    hf_dataset = os.getenv("HF_DATASET", "MRSHREY197/hitek-3digit-rah").strip()
 
-    last_digit = number[-1]
-    primary_url = f"https://huggingface.co/datasets/ansh21112/hitek-data-bucket/resolve/main/final_master_shard_{last_digit}.parquet"
-    alt_url = f"https://huggingface.co/datasets/ansh21112/hitek-data-bucket/resolve/main/alt_master_shard_{last_digit}.parquet"
+    # 3-digit shard routing (e.g., 027 for numbers ending in 027)
+    shard_id = number[-3:]
+    primary_url = f"https://huggingface.co/datasets/{hf_dataset}/resolve/main/main_shard_{shard_id}.parquet"
+    alt_url = f"https://huggingface.co/datasets/{hf_dataset}/resolve/main/alt_shard_{shard_id}.parquet"
 
-    print(f"[INFO] Searching data for: {number} (Shard: {last_digit})...")
+    print(f"[INFO] Searching data for: {number} (Shard: {shard_id})...")
 
     con = duckdb.connect(config={
         'max_memory': '250MB',
@@ -59,14 +63,14 @@ def fetch_data_direct(number: str, hf_token: str = None):
                 );
             """)
         except Exception as err:
-            print(f"[WARN] Secret setting: {err}")
+            print(f"[WARN] HF Secret setting error: {err}")
 
     try:
         # 1. Main Shard
         query_main = f"""
             SELECT mobile, name, fname, address, alt, circle, id, email 
             FROM read_parquet('{primary_url}') 
-            WHERE mobile IN ('{number}', ' {number} ')
+            WHERE TRIM(mobile) = '{number}' OR mobile IN ('{number}', ' {number} ')
         """
         rel_main = con.execute(query_main)
         cols_main = [d[0] for d in rel_main.description]
@@ -79,7 +83,7 @@ def fetch_data_direct(number: str, hf_token: str = None):
         query_alt = f"""
             SELECT mobile, name, fname, address, alt, circle, id, email 
             FROM read_parquet('{alt_url}') 
-            WHERE alt IN ('{number}', ' {number} ')
+            WHERE TRIM(alt) = '{number}' OR alt IN ('{number}', ' {number} ')
         """
         rel_alt = con.execute(query_alt)
         cols_alt = [d[0] for d in rel_alt.description]
@@ -105,22 +109,19 @@ def fetch_data_direct(number: str, hf_token: str = None):
                 "Developer": "@anupam"
             }
 
-        print("\n=== SUCCESSFUL RESULT ===")
-        print(json.dumps(result, indent=2, default=str, ensure_ascii=False))
         return result
 
     except Exception as e:
-        err_msg = str(e)
-        error_result = {
-            "status": "error",
-            "message": f"Database processing error: {err_msg}",
-            "Developer": "@anupam"
-        }
-        print("\n=== ERROR ===")
-        print(json.dumps(error_result, indent=2))
-        return error_result
+        print(f"[ERROR] Database query failed: {e}")
+        return None
 
 if __name__ == "__main__":
-    phone_num = sys.argv[1] if len(sys.argv) > 1 else input("Enter Phone Number: ")
-    token = sys.argv[2] if len(sys.argv) > 2 else os.getenv("HF_TOKEN", "")
-    fetch_data_direct(phone_num, token)
+    if len(sys.argv) < 2:
+        print("Usage: python fetch_direct.py <PHONE_NUMBER>")
+        print("Example: python fetch_direct.py 011100012027")
+        sys.exit(1)
+
+    phone = sys.argv[1]
+    res = fetch_data_direct(phone)
+    if res:
+        print(json.dumps(res, indent=2, ensure_ascii=False))

@@ -4,10 +4,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 import os
 import math
 import duckdb
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI()
 
-# Configure DuckDB with low memory footprint suitable for Render (512MB RAM free tier)
+# Configure DuckDB with low memory footprint suitable for free-tier deployments
 con = duckdb.connect(config={
     'max_memory': '250MB',
     'threads': '2',
@@ -17,17 +20,20 @@ con = duckdb.connect(config={
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 
-hf_token = os.getenv("HF_TOKEN", "").strip()
-if hf_token:
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+HF_DATASET = os.getenv("HF_DATASET", "MRSHREY197/hitek-3digit-rah").strip()
+
+if HF_TOKEN:
     try:
         con.execute(f"""
             CREATE OR REPLACE SECRET hf_secret (
                 TYPE HUGGINGFACE,
-                TOKEN '{hf_token}'
+                TOKEN '{HF_TOKEN}'
             );
         """)
+        print("[INFO] Configured DuckDB with Hugging Face Token.")
     except Exception as err:
-        print(f"Warning: Could not set HF secret: {err}")
+        print(f"[WARN] Could not set HF secret: {err}")
 
 LANDING_PAGE_HTML = """
 <!DOCTYPE html>
@@ -129,7 +135,7 @@ def query_parquet_shard(url: str, filter_col: str, number: str):
     query = f"""
         SELECT mobile, name, fname, address, alt, circle, id, email 
         FROM read_parquet('{url}') 
-        WHERE {filter_col} IN ('{number}', ' {number} ')
+        WHERE TRIM({filter_col}) = '{number}' OR {filter_col} IN ('{number}', ' {number} ')
     """
     rel = con.execute(query)
     cols = [d[0] for d in rel.description]
@@ -165,7 +171,7 @@ def root_landing_page():
 
 @app.get("/FetchData")
 def fetch_data(Number: str = Query(None)):
-    if not Number or not Number.isdigit() or len(Number) < 10 or len(Number) > 15:
+    if not Number:
         return JSONResponse(
             status_code=400,
             content={
@@ -175,24 +181,36 @@ def fetch_data(Number: str = Query(None)):
             }
         )
     
-    last_digit = Number[-1]
+    clean_number = Number.strip()
+    if not clean_number.isdigit() or len(clean_number) < 10 or len(clean_number) > 15:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "rejected",
+                "message": "Invalid parameter. STRICTLY use /FetchData?Number=XXXXXXXXXX",
+                "Developer": "@anupam"
+            }
+        )
     
-    primary_url = f"https://huggingface.co/datasets/ansh21112/hitek-data-bucket/resolve/main/final_master_shard_{last_digit}.parquet"
-    alt_url = f"https://huggingface.co/datasets/ansh21112/hitek-data-bucket/resolve/main/alt_master_shard_{last_digit}.parquet"
+    # 3-digit shard routing (e.g. 027 for numbers ending in 027)
+    shard_id = clean_number[-3:]
+    
+    primary_url = f"https://huggingface.co/datasets/{HF_DATASET}/resolve/main/main_shard_{shard_id}.parquet"
+    alt_url = f"https://huggingface.co/datasets/{HF_DATASET}/resolve/main/alt_shard_{shard_id}.parquet"
     
     try:
-        # 1. Query Main Shard (Low memory sequential)
-        main_records = query_parquet_shard(primary_url, "mobile", Number)
+        # 1. Query Main Shard
+        main_records = query_parquet_shard(primary_url, "mobile", clean_number)
         
         # 2. Query Alt Shard
-        alt_records = query_parquet_shard(alt_url, "alt", Number)
+        alt_records = query_parquet_shard(alt_url, "alt", clean_number)
         
         if not main_records and not alt_records:
             return JSONResponse(
                 status_code=404,
                 content={
                     "status": "not_found", 
-                    "phone": Number,
+                    "phone": clean_number,
                     "Developer": "@anupam"
                 }
             )
@@ -201,7 +219,7 @@ def fetch_data(Number: str = Query(None)):
             status_code=200,
             content={
                 "status": "success", 
-                "phone": Number,
+                "phone": clean_number,
                 "Data": {
                     "Main_Records": main_records,
                     "Alt_Records": alt_records
